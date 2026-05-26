@@ -46,7 +46,6 @@ public slots:
     void pointerLeft();
     void zoomIn();
     void zoomOut();
-    void enableAnnotations(bool enabled);
 
 private slots:
     void fftSizeChanged(int value);
@@ -65,6 +64,7 @@ private:
 public:
     QPushButton *fileOpenButton;
     QLineEdit *sampleRate;
+    QLabel *centerFrequency;
     QSlider *fftSizeSlider;
     QSlider *zoomLevelSlider;
     QSlider *powerMaxSlider;
@@ -80,7 +80,4 @@ public:
     QLabel *pointerTimeLabel;
     QLabel *pointerFreqLabel;
     QCheckBox *annosCheckBox;
-    QCheckBox *annoLabelCheckBox;
-    QCheckBox *commentsCheckBox;
-    QCheckBox *annoColorCheckBox;
 };

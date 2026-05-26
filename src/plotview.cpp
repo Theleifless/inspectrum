@@ -112,8 +112,8 @@ PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0})
 
     enableAnnotations(true);
     enableAnnoLabels(true);
-    enableAnnoColors(true);
-    enableAnnotationCommentsTooltips(true);
+    enableAnnoColors(false);
+    enableAnnotationCommentsTooltips(false);
 
     addPlot(spectrogramPlot);
 
@@ -265,6 +265,23 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
             }
         );
         menu.addAction(spectrumAction);
+    }
+
+    // SigMF annotation display options. Only offered while annotations are being
+    // shown (the dock's "Display" checkbox); these toggle how each box is drawn.
+    if (spectrogramPlot != nullptr && spectrogramPlot->isAnnotationsEnabled()) {
+        QMenu *sigmfMenu = menu.addMenu("SigMF");
+
+        auto addToggle = [&](const QString &name, bool checked, void (PlotView::*setter)(bool)) {
+            auto action = new QAction(name, sigmfMenu);
+            action->setCheckable(true);
+            action->setChecked(checked);
+            connect(action, &QAction::triggered, this, [this, setter](bool on) { (this->*setter)(on); });
+            sigmfMenu->addAction(action);
+        };
+        addToggle("Labels",   annotationLabelsEnabled,   &PlotView::enableAnnoLabels);
+        addToggle("Comments", annotationCommentsEnabled, &PlotView::enableAnnotationCommentsTooltips);
+        addToggle("Colors",   annotationColorsEnabled,   &PlotView::enableAnnoColors);
     }
 
     // Add submenu for extracting symbols
@@ -1089,6 +1106,7 @@ void PlotView::enableAnnotations(bool enabled)
 
 void PlotView::enableAnnoLabels(bool enabled)
 {
+    annotationLabelsEnabled = enabled;
     if (spectrogramPlot != nullptr)
         spectrogramPlot->enableAnnoLabels(enabled);
 
@@ -1104,6 +1122,7 @@ void PlotView::enableAnnotationCommentsTooltips(bool enabled)
 
 void PlotView::enableAnnoColors(bool enabled)
 {
+    annotationColorsEnabled = enabled;
     if (spectrogramPlot != nullptr)
         spectrogramPlot->enableAnnoColors(enabled);
 
