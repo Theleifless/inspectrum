@@ -343,18 +343,46 @@ float* SpectrogramPlot::getFFTTile(size_t tile)
 void SpectrogramPlot::getLine(float *dest, size_t sample)
 {
     if (inputSource && fft) {
-        // Make sample be the midpoint of the FFT, unless this takes us
-        // past the beginning of the inputSource (if we remove the
-        // std::max(·, 0), then an ugly red bar appears at the beginning
-        // of the spectrogram with large zooms and FFT sizes).
-        const auto first_sample = std::max(static_cast<ssize_t>(sample) - fftSize / 2,
-                        static_cast<ssize_t>(0));
-        auto buffer = inputSource->getSamples(first_sample, fftSize);
+        // Centre the FFT on `sample`. Clamp at the head of the file (otherwise
+        // an ugly red bar appears with large zooms and FFT sizes) and at the
+        // tail too -- previously when first_sample + fftSize exceeded EOF,
+        // getSamples returned null and we filled the column with -inf. That
+        // made the spectrogram visibly end fftSize/2 samples short of the
+        // trace plots' right edge. Zero-pad the partial buffer instead so the
+        // spectrogram and the trace plots stop at the same x-pixel.
+        const ssize_t available = static_cast<ssize_t>(inputSource->count());
+        ssize_t first_sample = static_cast<ssize_t>(sample) - fftSize / 2;
+        if (first_sample < 0)
+            first_sample = 0;
+
+        if (first_sample >= available) {
+            auto neg_infinity = -1 * std::numeric_limits<float>::infinity();
+            for (int i = 0; i < fftSize; i++, dest++)
+                *dest = neg_infinity;
+            return;
+        }
+
+        ssize_t want = fftSize;
+        if (first_sample + want > available)
+            want = available - first_sample;
+
+        auto buffer = inputSource->getSamples(first_sample, want);
         if (buffer == nullptr) {
             auto neg_infinity = -1 * std::numeric_limits<float>::infinity();
             for (int i = 0; i < fftSize; i++, dest++)
                 *dest = neg_infinity;
             return;
+        }
+
+        // Zero-pad to fftSize when getSamples returned a partial buffer at
+        // EOF. Cheaper than resizing in place -- we just need contiguous
+        // storage of length fftSize for the FFT.
+        if (want < fftSize) {
+            auto padded = std::make_unique<std::complex<float>[]>(fftSize);
+            std::copy(buffer.get(), buffer.get() + want, padded.get());
+            for (ssize_t i = want; i < fftSize; i++)
+                padded[i] = std::complex<float>(0.0f, 0.0f);
+            buffer = std::move(padded);
         }
 
         for (int i = 0; i < fftSize; i++) {
