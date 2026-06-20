@@ -833,6 +833,14 @@ void PlotView::setFFTAndZoom(int size, int zoom)
     if (verticalScrollBar()->maximum() == 0)
         oldPlotCenter = 0.5;
 
+    // Pin the cursors to absolute SAMPLE positions across the zoom change.
+    // The cursors store their position in viewport pixels; after zoom those
+    // pixels span a different sample count, so the symbol-rate / period
+    // readout would silently drift just because the user zoomed. Save the
+    // samples now and re-place the cursors on the new pixel grid below.
+    bool reanchorCursors = cursorsEnabled;
+    range_t<size_t> savedCursorSamples = selectedSamples;
+
     // Set new FFT size
     fftSize = size;
     if (spectrogramPlot != nullptr)
@@ -862,6 +870,22 @@ void PlotView::setFFTAndZoom(int size, int zoom)
     // maintain the relative position of the vertical scroll bar
     if (verticalScrollBar()->maximum())
         verticalScrollBar()->setValue((int )(oldPlotCenter * plotsHeight() - viewport()->height() / 2.0 + 0.5f));
+
+    // Re-place the cursors at their saved sample positions on the new pixel
+    // grid. cursors.setSelection() takes viewport-pixel coordinates, so we
+    // subtract the new scrollbar value to get there. updateView()'s own
+    // cursor refresh runs from selectedSamples too but can be perturbed by
+    // the cursorsMoved() signal cascade that fires during setSelection; this
+    // final write nails the canonical value back down.
+    if (reanchorCursors) {
+        int sb = horizontalScrollBar()->value();
+        int minPx = static_cast<int>(sampleToColumn(savedCursorSamples.minimum)) - sb;
+        int maxPx = static_cast<int>(sampleToColumn(savedCursorSamples.maximum)) - sb;
+        cursors.setSelection({minPx, maxPx});
+        selectedSamples = savedCursorSamples;
+        emitTimeSelection();
+        viewport()->update();
+    }
 }
 
 void PlotView::setPowerMin(int power)
