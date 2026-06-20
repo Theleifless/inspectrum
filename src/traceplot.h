@@ -32,6 +32,7 @@ public:
 
     void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     std::shared_ptr<AbstractSampleSource> source() { return sampleSource; };
+    void setSamplesPerColumn(int spc) { samplesPerColumn = std::max(1, spc); }
 
 signals:
     void imageReady(QString key, QImage image);
@@ -42,6 +43,11 @@ public slots:
 private:
     QSet<QString> tasks;
     const int tileWidth = 1000;
+    // Samples per pixel, fed in by PlotView so we stay aligned with the
+    // spectrogram (which uses fftSize / zoomLevel). 0 falls back to the legacy
+    // "stretch sampleRange to fill rect" behaviour for back-compat with any
+    // future TracePlot not driven by PlotView.
+    int samplesPerColumn = 0;
 
     QPixmap getTile(size_t tileID, size_t sampleCount);
     void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange);

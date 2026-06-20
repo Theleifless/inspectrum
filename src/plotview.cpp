@@ -124,6 +124,10 @@ void PlotView::addPlot(Plot *plot)
 {
     plots.emplace_back(plot);
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
+    // Seed any derived TracePlot with the global samples-per-pixel so it
+    // shares the spectrogram's x-axis from the moment it's added.
+    if (auto trace = dynamic_cast<TracePlot*>(plot))
+        trace->setSamplesPerColumn(samplesPerColumn());
 }
 
 void PlotView::addSpectrumPlot()
@@ -840,6 +844,13 @@ void PlotView::setFFTAndZoom(int size, int zoom)
     if (spectrogramPlot != nullptr) {
         spectrogramPlot->setZoomLevel(zoomLevel);
         spectrogramPlot->setSkip(nfftSkip);
+    }
+
+    // Propagate the new samples-per-pixel to any TracePlot (envelope, IFR,
+    // phase, threshold, etc.) so they redraw at the spectrogram's x-scale.
+    for (auto&& p : plots) {
+        if (auto trace = dynamic_cast<TracePlot*>(p.get()))
+            trace->setSamplesPerColumn(samplesPerColumn());
     }
 
     // Update horizontal (time) scrollbar

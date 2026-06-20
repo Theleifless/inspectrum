@@ -32,11 +32,19 @@ void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleR
 {
     if (sampleRange.length() == 0) return;
 
-    int samplesPerColumn = std::max(1UL, sampleRange.length() / rect.width());
-    int samplesPerTile = tileWidth * samplesPerColumn;
+    // Prefer the explicit samples-per-column set by PlotView so we share the
+    // same x-axis scale as the spectrogram (governed by fftSize / zoomLevel).
+    // Computing it locally as sampleRange.length() / rect.width() goes wrong
+    // when viewRange is clamped to a small file -- the trace stretches across
+    // the full viewport while the spectrogram fills only the leading pixels,
+    // and the two panels visibly disagree on the time axis.
+    int spc = samplesPerColumn > 0
+        ? samplesPerColumn
+        : std::max(1, int(sampleRange.length() / rect.width()));
+    int samplesPerTile = tileWidth * spc;
     size_t tileID = sampleRange.minimum / samplesPerTile;
     size_t tileOffset = sampleRange.minimum % samplesPerTile; // Number of samples to skip from first image tile
-    int xOffset = tileOffset / samplesPerColumn; // Number of columns to skip from first image tile
+    int xOffset = tileOffset / spc; // Number of columns to skip from first image tile
 
     // Paint first (possibly partial) tile
     painter.drawPixmap(
