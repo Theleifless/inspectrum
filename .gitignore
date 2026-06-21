@@ -1,2 +1,5 @@
 # Build outputs
 build/
+
+# Claude Code local tooling/permission config
+.claude/
