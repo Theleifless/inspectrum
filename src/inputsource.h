@@ -41,6 +41,7 @@ private:
     std::unique_ptr<SampleAdapter> sampleAdapter;
     std::string _fmt;
     bool _realSignal = false;
+    QString sigmfMetaFilename;
 
     QJsonObject readMetaData(const QString &filename);
 
@@ -62,4 +63,7 @@ public:
     float relativeBandwidth() {
         return 1;
     }
+
+    QString getSigMFMetaFilename() const { return sigmfMetaFilename; }
+    bool saveAnnotationsToSigMF(QString *errorOut = nullptr);
 };

@@ -125,9 +125,14 @@ void PlotView::addPlot(Plot *plot)
     plots.emplace_back(plot);
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
     // Seed any derived TracePlot with the global samples-per-pixel so it
-    // shares the spectrogram's x-axis from the moment it's added.
-    if (auto trace = dynamic_cast<TracePlot*>(plot))
+    // shares the spectrogram's x-axis from the moment it's added. Also seed
+    // its vertical zoom so a freshly-added plot doesn't look 1/4 the size of
+    // the already-zoomed spectrogram.
+    if (auto trace = dynamic_cast<TracePlot*>(plot)) {
         trace->setSamplesPerColumn(samplesPerColumn());
+        if (currentFreqZoom > 1.0)
+            trace->setVerticalZoom(currentFreqZoom);
+    }
 }
 
 void PlotView::addSpectrumPlot()
@@ -410,7 +415,23 @@ bool PlotView::viewportEvent(QEvent *event) {
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {
         QWheelEvent *wheelEvent = (QWheelEvent*)event;
-        if (QApplication::keyboardModifiers() & Qt::ControlModifier) {
+        auto mods = QApplication::keyboardModifiers();
+
+        // Alt+wheel adjusts the spectrogram's freq (vertical) zoom in
+        // fractional steps. Anchored to the pointer's frequency so the band
+        // you're inspecting stays under the cursor.
+        if (mods & Qt::AltModifier) {
+            int delta = wheelEvent->angleDelta().y();
+            // angleDelta is in eighths of a degree; one notch = ±120.
+            int steps = delta / 120;
+            if (steps == 0)
+                steps = (delta > 0) ? 1 : (delta < 0 ? -1 : 0);
+            if (steps != 0)
+                emit freqZoomNudge(steps);
+            return true;
+        }
+
+        if (mods & Qt::ControlModifier) {
             bool canZoomIn = zoomLevel < fftSize;
             bool canZoomOut = zoomLevel > 1;
             int delta = wheelEvent->angleDelta().y();
@@ -905,6 +926,52 @@ void PlotView::setFFTAndZoom(int size, int zoom)
     }
 }
 
+void PlotView::setFrequencyZoom(double zoom)
+{
+    if (spectrogramPlot == nullptr) return;
+
+    // Keep the same frequency under the viewport's vertical centre across the
+    // zoom. The spectrogram is the first plot, so its top edge sits at
+    // viewport-y = -scrollbar, and a viewport-centre y maps to spectrogram-y
+    // (scrollbar + viewport_h/2). After the height changes by zoomRatio we
+    // scale that position so the same frequency lands at the new viewport
+    // centre. Earlier we used the fraction over plotsHeight() which is wrong
+    // when there are other plots stacked below -- you'd land on a different
+    // band of the spectrogram every time you zoomed.
+    int oldHeight = spectrogramPlot->height();
+    if (oldHeight <= 0) {
+        spectrogramPlot->setFrequencyZoom(zoom);
+        updateView();
+        viewport()->update();
+        return;
+    }
+    int viewportH = viewport()->height();
+    int centreYInSpec = verticalScrollBar()->value() + viewportH / 2;
+    // Clamp so we don't anchor outside the spectrogram (e.g. user scrolled
+    // down into a stacked derived plot when they trigger the zoom).
+    centreYInSpec = std::max(0, std::min(oldHeight, centreYInSpec));
+
+    spectrogramPlot->setFrequencyZoom(zoom);
+    currentFreqZoom = std::max(1.0, zoom);
+
+    // Also stretch stacked TracePlots (envelope, IFR, phase, ...) by the same
+    // factor so derived plots scale together with the spectrogram. Without
+    // this the spectrogram grows 4x but the IFR trace stays at its base
+    // height, looking visually disconnected and clipping its own Y range.
+    for (auto&& p : plots) {
+        if (auto trace = dynamic_cast<TracePlot*>(p.get()))
+            trace->setVerticalZoom(currentFreqZoom);
+    }
+    updateView();
+
+    int newHeight = spectrogramPlot->height();
+    double scale = double(newHeight) / double(oldHeight);
+    int newScrollVal = int(centreYInSpec * scale - viewportH / 2.0 + 0.5);
+    newScrollVal = std::max(0, std::min(verticalScrollBar()->maximum(), newScrollVal));
+    verticalScrollBar()->setValue(newScrollVal);
+    viewport()->update();
+}
+
 void PlotView::setPowerMin(int power)
 {
     powerMin = power;
@@ -933,8 +1000,10 @@ void PlotView::paintEvent(QPaintEvent *event)
 #define PLOT_LAYER(paintFunc)                                                   \
     {                                                                           \
         int y = -verticalScrollBar()->value();                                  \
+        size_t spc = samplesPerColumn();                                        \
         for (auto&& plot : plots) {                                             \
             QRect rect = QRect(0, y, width(), plot->height());                  \
+            plot->setViewSamplesPerColumn(spc);                                 \
             plot->paintFunc(painter, rect, viewRange);                          \
             y += plot->height();                                                \
         }                                                                       \

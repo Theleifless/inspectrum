@@ -284,15 +284,29 @@ void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> s
     size_t tileID = sampleRange.minimum - sampleOffset;
     int xoffset = sampleOffset / getStride();
 
+    // The pre-rendered tile pixmap is always fftSize pixels tall (one row per
+    // FFT bin). The plot's height() can be larger (fftSize * freqZoom) when
+    // vertical zoom is on -- letting QPainter stretch handles that. For real
+    // signals we additionally clip the source to the positive-frequency half
+    // (pixmap rows fftSize/2 .. fftSize-1) since the rest is the mirror.
+    const int srcY = inputSource->realSignal() ? fftSize / 2 : 0;
+    const int srcH = inputSource->realSignal() ? fftSize / 2 : fftSize;
+
     // Paint first (possibly partial) tile
-    painter.drawPixmap(QRect(rect.left(), rect.y(), linesPerTile() - xoffset, height()), *getPixmapTile(tileID), QRect(xoffset, 0, linesPerTile() - xoffset, height()));
+    painter.drawPixmap(
+        QRect(rect.left(), rect.y(), linesPerTile() - xoffset, height()),
+        *getPixmapTile(tileID),
+        QRect(xoffset, srcY, linesPerTile() - xoffset, srcH));
     tileID += getStride() * linesPerTile();
 
     // Paint remaining tiles
     for (int x = linesPerTile() - xoffset; x < rect.right(); x += linesPerTile()) {
         // TODO: don't draw past rect.right()
         // TODO: handle partial final tile
-        painter.drawPixmap(QRect(x, rect.y(), linesPerTile(), height()), *getPixmapTile(tileID), QRect(0, 0, linesPerTile(), height()));
+        painter.drawPixmap(
+            QRect(x, rect.y(), linesPerTile(), height()),
+            *getPixmapTile(tileID),
+            QRect(0, srcY, linesPerTile(), srcH));
         tileID += getStride() * linesPerTile();
     }
 }
@@ -421,7 +435,12 @@ int SpectrogramPlot::getStride()
 
 float SpectrogramPlot::getTunerPhaseInc()
 {
-    auto freq = 0.5f - tuner.centre() / (float)fftSize;
+    // tuner.centre() is in PLOT pixels (height = fftSize * freqZoom, or half
+    // that for real signals). Dividing by fftSize was correct only at
+    // freqZoom == 1 -- once vertical zoom is on, the tuner mixes to the
+    // wrong frequency unless we use the actual logical span. spectrumHeight()
+    // handles both the freq-zoom multiplier and the real-signal half-span.
+    auto freq = 0.5f - tuner.centre() / (float)spectrumHeight();
     return freq * Tau;
 }
 
@@ -469,7 +488,13 @@ double SpectrogramPlot::getTunerRelativeBandwidth()
 
 std::vector<float> SpectrogramPlot::getTunerTaps()
 {
-    float cutoff = tuner.deviation() / (float)fftSize;
+    // Same reasoning as getTunerPhaseInc: use the logical spectrum extent in
+    // pixels, not fftSize, so the tuner's cutoff stays correct when freq
+    // zoom is engaged. Clamp into liquid_firdes_kaiser's accepted (0, 0.5)
+    // range -- at tiny fftSize the default tuner deviation can exceed half
+    // the spectrum.
+    float cutoff = tuner.deviation() / (float)spectrumHeight();
+    cutoff = clamp(cutoff, 0.001f, 0.499f);
     float gain = pow(10.0f, powerMax / -10.0f);
     auto atten = 60.0f;
     auto len = estimate_req_filter_len(std::min(cutoff, 0.05f), atten);
@@ -516,15 +541,37 @@ void SpectrogramPlot::setFFTSize(int size)
     }
 
     if (inputSource->realSignal()) {
-        setHeight(fftSize/2);
+        setHeight(int((fftSize / 2) * freqZoom + 0.5));
     } else {
-        setHeight(fftSize);
+        setHeight(int(fftSize * freqZoom + 0.5));
     }
     auto dev = tuner.deviation();
     auto centre = tuner.centre();
     tuner.setHeight(height());
     tuner.setDeviation( dev * sizeScale );
     tuner.setCentre( centre * sizeScale );
+}
+
+void SpectrogramPlot::setFrequencyZoom(double zoom)
+{
+    double newZoom = std::max(1.0, zoom);
+    if (newZoom == freqZoom) return;
+
+    // The tuner stores its centre/deviation in spectrogram pixels. When the
+    // spectrogram's height changes, we have to rescale those pixel positions
+    // so the band stays at the same frequency. setFFTSize() does a similar
+    // sizeScale dance for FFT-size changes but assumes height = fftSize *
+    // freqZoom; we apply just the freqZoom ratio here.
+    double scale = newZoom / freqZoom;
+    int oldCentre = tuner.centre();
+    int oldDev = tuner.deviation();
+
+    freqZoom = newZoom;
+    setFFTSize(fftSize); // recomputes height(); sizeScale = 1 so it's a no-op for the tuner
+
+    tuner.setHeight(height());
+    tuner.setCentre(int(oldCentre * scale + 0.5));
+    tuner.setDeviation(int(oldDev * scale + 0.5));
 }
 
 void SpectrogramPlot::setPowerMax(int power)

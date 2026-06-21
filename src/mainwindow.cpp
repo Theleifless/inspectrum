@@ -46,6 +46,8 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::openFile, this, &MainWindow::openFile);
     connect(dock->sampleRate, static_cast<void (QLineEdit::*)(const QString&)>(&QLineEdit::textChanged), this, static_cast<void (MainWindow::*)(QString)>(&MainWindow::setSampleRate));
     connect(dock, static_cast<void (SpectrogramControls::*)(int, int)>(&SpectrogramControls::fftOrZoomChanged), plots, &PlotView::setFFTAndZoom);
+    connect(dock, &SpectrogramControls::freqZoomChanged, plots, &PlotView::setFrequencyZoom);
+    connect(plots, &PlotView::freqZoomNudge, dock, &SpectrogramControls::nudgeFreqZoom);
     connect(dock->powerMaxSlider, &QSlider::valueChanged, plots, &PlotView::setPowerMax);
     connect(dock->powerMinSlider, &QSlider::valueChanged, plots, &PlotView::setPowerMin);
     connect(dock->cursorsCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableCursors);
@@ -65,6 +67,37 @@ MainWindow::MainWindow()
     // Set defaults after making connections so everything is in sync
     dock->setDefaults();
 
+    // File menu: persisting edited annotations back to the source .sigmf-meta.
+    auto fileMenu = menuBar()->addMenu(tr("&File"));
+    auto saveAnnoAction = fileMenu->addAction(tr("&Save Annotations to SigMF"));
+    saveAnnoAction->setShortcut(QKeySequence::Save);
+    saveAnnoAction->setStatusTip(tr("Write the current annotation list back "
+                                    "to the loaded .sigmf-meta (creates a "
+                                    ".sigmf-meta.bak on first save)."));
+    connect(saveAnnoAction, &QAction::triggered, this, &MainWindow::saveAnnotationsToSigMF);
+}
+
+void MainWindow::saveAnnotationsToSigMF()
+{
+    if (!input) return;
+    if (input->getSigMFMetaFilename().isEmpty()) {
+        QMessageBox::information(this, tr("Save Annotations"),
+            tr("This file isn't a SigMF dataset — there is no .sigmf-meta to write annotations to. "
+               "Open a .sigmf-meta or .sigmf-data file to enable annotation save."));
+        return;
+    }
+
+    QString errMsg;
+    if (input->saveAnnotationsToSigMF(&errMsg)) {
+        statusBar()->showMessage(
+            tr("Saved %1 annotations to %2")
+                .arg(int(input->annotationList.size()))
+                .arg(input->getSigMFMetaFilename()),
+            5000);
+    } else {
+        QMessageBox::warning(this, tr("Save Annotations"),
+            tr("Could not save annotations: %1").arg(errMsg));
+    }
 }
 
 void MainWindow::openFile(QString fileName)

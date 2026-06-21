@@ -19,7 +19,9 @@
 
 #pragma once
 
+#include <QComboBox>
 #include <QDockWidget>
+#include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QLineEdit>
 #include <QPushButton>
@@ -38,6 +40,7 @@ public:
 
 signals:
     void fftOrZoomChanged(int fftSize, int zoomLevel);
+    void freqZoomChanged(double zoom);
     void openFile(QString fileName);
 
 public slots:
@@ -50,8 +53,12 @@ public slots:
 private slots:
     void fftSizeChanged(int value);
     void zoomLevelChanged(int value);
+    void onFreqZoomSpinChanged(double value);
     void powerMinChanged(int value);
     void powerMaxChanged(int value);
+
+public slots:
+    void nudgeFreqZoom(int steps);
     void fileOpenButtonClicked();
     void cursorsStateChanged(int state);
 
@@ -65,8 +72,9 @@ public:
     QPushButton *fileOpenButton;
     QLineEdit *sampleRate;
     QLabel *centerFrequency;
-    QSlider *fftSizeSlider;
+    QComboBox *fftSizeCombo;
     QSlider *zoomLevelSlider;
+    QDoubleSpinBox *freqZoomSpin;
     QSlider *powerMaxSlider;
     QSlider *powerMinSlider;
     QCheckBox *cursorsCheckBox;

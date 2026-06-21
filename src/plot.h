@@ -41,6 +41,12 @@ public:
     virtual void paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     int height() const { return _height; };
 
+    // PlotView pushes its global samples-per-pixel before painting so subclasses
+    // (TracePlot in particular) use the SAME x-scale as the spectrogram instead
+    // of stretching to fit sampleRange across the viewport.
+    void setViewSamplesPerColumn(size_t spc) { _viewSamplesPerColumn = spc; }
+    size_t viewSamplesPerColumn() const { return _viewSamplesPerColumn; }
+
 signals:
     void repaint();
 
@@ -52,4 +58,5 @@ protected:
 private:
     // TODO: don't hardcode this
     int _height = 200;
+    size_t _viewSamplesPerColumn = 1;
 };

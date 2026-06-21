@@ -104,6 +104,7 @@ public slots:
     void setPowerMin(int power);
     void setZoomLevel(int zoom);
     void setSkip(int skip);
+    void setFrequencyZoom(double zoom);
     void tunerMoved();
 
 private:
@@ -121,6 +122,7 @@ private:
     int fftSize;
     int zoomLevel;
     int nfftSkip;
+    double freqZoom = 1.0; // Vertical zoom: spectrogram height = fftSize * freqZoom
     int decimationPreview = 0;
     double decimationOffset = 0;
     float powerMax;

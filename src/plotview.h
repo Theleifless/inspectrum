@@ -49,6 +49,7 @@ signals:
     void pointerLeft();
     void zoomIn();
     void zoomOut();
+    void freqZoomNudge(int steps);
     void spectrumPlotAdded(SpectrumView *plot);
 
 public slots:
@@ -64,6 +65,7 @@ public slots:
     void repaint();
     void setCursorSegments(int segments);
     void setFFTAndZoom(int fftSize, int zoomLevel);
+    void setFrequencyZoom(double zoom);
     void setPowerMin(int power);
     void setPowerMax(int power);
 
@@ -91,6 +93,7 @@ private:
     int fftSize = 1024;
     int zoomLevel = 1;
     int nfftSkip = 1;
+    double currentFreqZoom = 1.0; // last applied vertical zoom; seeds newly added plots
     int powerMin;
     int powerMax;
     bool cursorsEnabled;
