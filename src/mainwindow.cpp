@@ -54,6 +54,13 @@ MainWindow::MainWindow()
     connect(dock->scalesCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableScales);
     connect(dock->crosshairCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableCrosshairs);
     connect(dock->annosCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnotations);
+    connect(dock->annoEditCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnotationEdit);
+    // Keep the dock checkbox in sync when edit mode is toggled from the
+    // right-click SigMF menu. Block signals so we don't loop back into the slot.
+    connect(plots, &PlotView::annotationEditChanged, dock, [this](bool on) {
+        QSignalBlocker block(dock->annoEditCheckBox);
+        dock->annoEditCheckBox->setChecked(on);
+    });
     connect(dock->cursorSymbolsSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), plots, &PlotView::setCursorSegments);
 
     // Connect dock outputs

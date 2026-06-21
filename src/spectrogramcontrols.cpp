@@ -136,6 +136,11 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     annosCheckBox = new QCheckBox(widget);
     layout->addRow(new QLabel(tr("Display:")), annosCheckBox);
 
+    // "Edit" arms drag-to-resize/move on the annotation boxes; off by default so
+    // normal pan/cursor behaviour is unchanged until the user opts in.
+    annoEditCheckBox = new QCheckBox(widget);
+    layout->addRow(new QLabel(tr("Edit:")), annoEditCheckBox);
+
     widget->setLayout(layout);
     setWidget(widget);
 

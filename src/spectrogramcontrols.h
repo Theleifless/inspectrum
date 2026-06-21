@@ -88,4 +88,5 @@ public:
     QLabel *pointerTimeLabel;
     QLabel *pointerFreqLabel;
     QCheckBox *annosCheckBox;
+    QCheckBox *annoEditCheckBox;
 };

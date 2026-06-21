@@ -296,6 +296,7 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         addToggle("Labels",   annotationLabelsEnabled,   &PlotView::enableAnnoLabels);
         addToggle("Comments", annotationCommentsEnabled, &PlotView::enableAnnotationCommentsTooltips);
         addToggle("Colors",   annotationColorsEnabled,   &PlotView::enableAnnoColors);
+        addToggle("Edit (drag to resize/move)", annotationEditEnabled, &PlotView::enableAnnotationEdit);
 
         // Offer to edit the annotation under the cursor (label / comment /
         // colour). Writes the change into the in-memory annotation list; the
@@ -510,6 +511,11 @@ bool PlotView::viewportEvent(QEvent *event) {
         event->type() == QEvent::MouseButtonRelease) {
 
         QMouseEvent *mouseEvent = static_cast<QMouseEvent *>(event);
+
+        // Annotation drag-editing takes the gesture before panning/cursors/tuner
+        // when the "Edit annotations" toggle is on and a box/handle is grabbed.
+        if (annotationEditEnabled && annotationEditMouse(event->type(), mouseEvent))
+            return true;
 
         int plotY = -verticalScrollBar()->value();
         for (auto&& plot : plots) {
@@ -1259,6 +1265,151 @@ void PlotView::enableAnnotations(bool enabled)
         spectrogramPlot->enableAnnotations(enabled);
 
     viewport()->update();
+}
+
+void PlotView::enableAnnotationEdit(bool enabled)
+{
+    annotationEditEnabled = enabled;
+    annotationDragging = false;
+    annoDragIndex = -1;
+
+    // While editing, take over the drag gesture (ScrollHandDrag would otherwise
+    // pan and steal the cursor). Restore panning when leaving edit mode, unless
+    // the crosshair overlay owns the drag mode.
+    if (enabled) {
+        setDragMode(QGraphicsView::NoDrag);
+    } else if (!crosshairsEnabled) {
+        setDragMode(QGraphicsView::ScrollHandDrag);
+        viewport()->unsetCursor();
+    }
+
+    emit annotationEditChanged(enabled);
+    viewport()->update();
+}
+
+size_t PlotView::pointerSampleAt(int viewportX)
+{
+    return columnToSample(horizontalScrollBar()->value() + viewportX);
+}
+
+double PlotView::pointerFreqAt(int viewportY)
+{
+    int spectrogramTop = -verticalScrollBar()->value();
+    return spectrogramPlot->annotationFreqAtY(viewportY - spectrogramTop);
+}
+
+bool PlotView::annotationEditMouse(QEvent::Type type, QMouseEvent *event)
+{
+    if (spectrogramPlot == nullptr || !spectrogramPlot->isAnnotationsEnabled())
+        return false;
+
+    auto input = spectrogramPlot->input();
+    if (!input)
+        return false;
+    auto &annotations = input->annotationList;
+
+    const QPoint pos = event->pos();
+
+    if (type == QEvent::MouseButtonPress && event->button() == Qt::LeftButton) {
+        AnnotationHit hit = spectrogramPlot->annotationHandleAt(pos);
+        if (hit.index < 0 || hit.index >= static_cast<int>(annotations.size()))
+            return false;
+
+        annotationDragging = true;
+        annoDragIndex = hit.index;
+        annoDragHandle = hit.handle;
+        annoDragStartSamples = annotations[hit.index].sampleRange;
+        annoDragStartFreq = annotations[hit.index].frequencyRange;
+        annoDragStartPointerSample = pointerSampleAt(pos.x());
+        annoDragStartPointerFreq = pointerFreqAt(pos.y());
+        return true;
+    }
+
+    if (type == QEvent::MouseMove) {
+        if (!annotationDragging) {
+            updateAnnotationEditCursor(pos);
+            return false;   // let hover fall through to readout/crosshair
+        }
+        if (annoDragIndex < 0 || annoDragIndex >= static_cast<int>(annotations.size()))
+            return true;
+
+        Annotation &a = annotations[annoDragIndex];
+        size_t curSample = pointerSampleAt(pos.x());
+        double curFreq = pointerFreqAt(pos.y());
+
+        auto h = annoDragHandle;
+        bool left   = h == AnnotationHandle::Left  || h == AnnotationHandle::TopLeft    || h == AnnotationHandle::BottomLeft;
+        bool right  = h == AnnotationHandle::Right || h == AnnotationHandle::TopRight   || h == AnnotationHandle::BottomRight;
+        bool top    = h == AnnotationHandle::Top   || h == AnnotationHandle::TopLeft    || h == AnnotationHandle::TopRight;
+        bool bottom = h == AnnotationHandle::Bottom|| h == AnnotationHandle::BottomLeft || h == AnnotationHandle::BottomRight;
+
+        if (h == AnnotationHandle::Body) {
+            // Translate both ranges by the pointer delta since drag start.
+            ssize_t dSample = static_cast<ssize_t>(curSample) - static_cast<ssize_t>(annoDragStartPointerSample);
+            double dFreq = curFreq - annoDragStartPointerFreq;
+            ssize_t newMin = static_cast<ssize_t>(annoDragStartSamples.minimum) + dSample;
+            ssize_t newMax = static_cast<ssize_t>(annoDragStartSamples.maximum) + dSample;
+            if (newMin < 0) { newMax -= newMin; newMin = 0; }   // clamp at file head, keep width
+            a.sampleRange = { static_cast<size_t>(newMin), static_cast<size_t>(newMax) };
+            a.frequencyRange = { annoDragStartFreq.minimum + dFreq, annoDragStartFreq.maximum + dFreq };
+        } else {
+            // Resize: the grabbed edge follows the pointer; the opposite edge is
+            // pinned. Guard against the edges crossing (keep >= 1 sample / >0 Hz).
+            if (left)
+                a.sampleRange.minimum = std::min(curSample, a.sampleRange.maximum - 1);
+            if (right)
+                a.sampleRange.maximum = std::max(curSample, a.sampleRange.minimum + 1);
+            // y grows downward => smaller y is higher freq (Top -> freq max).
+            if (top)
+                a.frequencyRange.maximum = std::max(curFreq, a.frequencyRange.minimum);
+            if (bottom)
+                a.frequencyRange.minimum = std::min(curFreq, a.frequencyRange.maximum);
+        }
+
+        updateAnnotationEditCursor(pos);
+        viewport()->update();
+        return true;
+    }
+
+    if (type == QEvent::MouseButtonRelease && event->button() == Qt::LeftButton) {
+        if (annotationDragging) {
+            annotationDragging = false;
+            annoDragIndex = -1;
+            annoDragHandle = AnnotationHandle::None;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void PlotView::updateAnnotationEditCursor(const QPoint &pos)
+{
+    if (!annotationEditEnabled)
+        return;
+
+    AnnotationHandle h = annotationDragging
+        ? annoDragHandle
+        : spectrogramPlot->annotationHandleAt(pos).handle;
+
+    Qt::CursorShape shape;
+    switch (h) {
+        case AnnotationHandle::Left:
+        case AnnotationHandle::Right:       shape = Qt::SizeHorCursor; break;
+        case AnnotationHandle::Top:
+        case AnnotationHandle::Bottom:      shape = Qt::SizeVerCursor; break;
+        case AnnotationHandle::TopLeft:
+        case AnnotationHandle::BottomRight: shape = Qt::SizeFDiagCursor; break;
+        case AnnotationHandle::TopRight:
+        case AnnotationHandle::BottomLeft:  shape = Qt::SizeBDiagCursor; break;
+        case AnnotationHandle::Body:        shape = Qt::SizeAllCursor; break;
+        default:                            shape = Qt::ArrowCursor; break;
+    }
+
+    if (h == AnnotationHandle::None)
+        viewport()->unsetCursor();
+    else
+        viewport()->setCursor(shape);
 }
 
 void PlotView::enableAnnoLabels(bool enabled)

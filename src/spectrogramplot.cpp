@@ -289,6 +289,32 @@ int SpectrogramPlot::annotationIndexAt(const QPoint &pos)
     return found;
 }
 
+AnnotationHit SpectrogramPlot::annotationHandleAt(const QPoint &pos, int margin)
+{
+    // Topmost (last-drawn) box whose edge/corner/body contains the point wins.
+    AnnotationHit hit;
+    for (auto& a : visibleAnnotationLocations) {
+        AnnotationHandle h = a.handleAt(pos.x(), pos.y(), margin);
+        if (h != AnnotationHandle::None) {
+            hit.index = a.index;
+            hit.handle = h;
+        }
+    }
+    return hit;
+}
+
+double SpectrogramPlot::annotationFreqAtY(int relY)
+{
+    // Inverse of paintAnnotations()'s y mapping:
+    //   localY = height()/2 - (absFreq - getFrequency()) / sampleRate * height()
+    int h = height();
+    double centre = inputSource ? inputSource->getFrequency() : 0.0;
+    if (h <= 0 || sampleRate <= 0)
+        return centre;
+    double rel = ((double)h / 2.0 - relY) / (double)h * sampleRate;
+    return rel + centre;
+}
+
 void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
     if (!inputSource || inputSource->count() == 0)
