@@ -40,6 +40,7 @@ public slots:
     void setFormat(QString fmt);
     void addSpectrumPlot(SpectrumView *plot);
     void invalidateEvent() override;
+    void saveAnnotationsToSigMF();
 
 private:
     SpectrogramControls *dock;

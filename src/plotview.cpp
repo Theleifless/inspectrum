@@ -18,6 +18,7 @@
  */
 
 #include "plotview.h"
+#include "annotationdialog.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -124,6 +125,15 @@ void PlotView::addPlot(Plot *plot)
 {
     plots.emplace_back(plot);
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
+    // Seed any derived TracePlot with the global samples-per-pixel so it
+    // shares the spectrogram's x-axis from the moment it's added. Also seed
+    // its vertical zoom so a freshly-added plot doesn't look 1/4 the size of
+    // the already-zoomed spectrogram.
+    if (auto trace = dynamic_cast<TracePlot*>(plot)) {
+        trace->setSamplesPerColumn(samplesPerColumn());
+        if (currentFreqZoom > 1.0)
+            trace->setVerticalZoom(currentFreqZoom);
+    }
 }
 
 void PlotView::addSpectrumPlot()
@@ -286,6 +296,20 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         addToggle("Labels",   annotationLabelsEnabled,   &PlotView::enableAnnoLabels);
         addToggle("Comments", annotationCommentsEnabled, &PlotView::enableAnnotationCommentsTooltips);
         addToggle("Colors",   annotationColorsEnabled,   &PlotView::enableAnnoColors);
+        addToggle("Edit (drag to resize/move)", annotationEditEnabled, &PlotView::enableAnnotationEdit);
+
+        // Offer to edit the annotation under the cursor (label / comment /
+        // colour). Writes the change into the in-memory annotation list; the
+        // user persists it with File -> Save Annotations to SigMF.
+        int annoIdx = spectrogramPlot->annotationIndexAt(event->pos());
+        if (annoIdx >= 0) {
+            sigmfMenu->addSeparator();
+            auto editAction = new QAction(tr("Edit annotation..."), sigmfMenu);
+            connect(editAction, &QAction::triggered, this, [this, annoIdx]() {
+                editAnnotation(annoIdx);
+            });
+            sigmfMenu->addAction(editAction);
+        }
     }
 
     // Add submenu for extracting symbols
@@ -341,6 +365,28 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     updateViewRange(false);
     if(menu.exec(event->globalPos()))
         updateView(false);
+}
+
+void PlotView::editAnnotation(int index)
+{
+    if (spectrogramPlot == nullptr)
+        return;
+    auto input = spectrogramPlot->input();
+    if (!input || index < 0 || index >= static_cast<int>(input->annotationList.size()))
+        return;
+
+    Annotation &a = input->annotationList[index];
+    AnnotationDialog dialog(a.label, a.comment, a.boxColor, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    a.label = dialog.label();
+    a.comment = dialog.comment();
+    a.boxColor = dialog.color();   // invalid QColor -> save omits presentation:color
+
+    // Annotations are an overlay (painted each frame from annotationList, not
+    // baked into the cached FFT tiles), so a repaint is enough to reflect edits.
+    viewport()->update();
 }
 
 void PlotView::cursorsMoved()
@@ -406,7 +452,23 @@ bool PlotView::viewportEvent(QEvent *event) {
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {
         QWheelEvent *wheelEvent = (QWheelEvent*)event;
-        if (QApplication::keyboardModifiers() & Qt::ControlModifier) {
+        auto mods = QApplication::keyboardModifiers();
+
+        // Alt+wheel adjusts the spectrogram's freq (vertical) zoom in
+        // fractional steps. Anchored to the pointer's frequency so the band
+        // you're inspecting stays under the cursor.
+        if (mods & Qt::AltModifier) {
+            int delta = wheelEvent->angleDelta().y();
+            // angleDelta is in eighths of a degree; one notch = ±120.
+            int steps = delta / 120;
+            if (steps == 0)
+                steps = (delta > 0) ? 1 : (delta < 0 ? -1 : 0);
+            if (steps != 0)
+                emit freqZoomNudge(steps);
+            return true;
+        }
+
+        if (mods & Qt::ControlModifier) {
             bool canZoomIn = zoomLevel < fftSize;
             bool canZoomOut = zoomLevel > 1;
             int delta = wheelEvent->angleDelta().y();
@@ -449,6 +511,11 @@ bool PlotView::viewportEvent(QEvent *event) {
         event->type() == QEvent::MouseButtonRelease) {
 
         QMouseEvent *mouseEvent = static_cast<QMouseEvent *>(event);
+
+        // Annotation drag-editing takes the gesture before panning/cursors/tuner
+        // when the "Edit annotations" toggle is on and a box/handle is grabbed.
+        if (annotationEditEnabled && annotationEditMouse(event->type(), mouseEvent))
+            return true;
 
         int plotY = -verticalScrollBar()->value();
         for (auto&& plot : plots) {
@@ -846,6 +913,14 @@ void PlotView::setFFTAndZoom(int size, int zoom)
     if (verticalScrollBar()->maximum() == 0)
         oldPlotCenter = 0.5;
 
+    // Pin the cursors to absolute SAMPLE positions across the zoom change.
+    // The cursors store their position in viewport pixels; after zoom those
+    // pixels span a different sample count, so the symbol-rate / period
+    // readout would silently drift just because the user zoomed. Save the
+    // samples now and re-place the cursors on the new pixel grid below.
+    bool reanchorCursors = cursorsEnabled;
+    range_t<size_t> savedCursorSamples = selectedSamples;
+
     // Set new FFT size
     fftSize = size;
     if (spectrogramPlot != nullptr)
@@ -859,6 +934,13 @@ void PlotView::setFFTAndZoom(int size, int zoom)
         spectrogramPlot->setSkip(nfftSkip);
     }
 
+    // Propagate the new samples-per-pixel to any TracePlot (envelope, IFR,
+    // phase, threshold, etc.) so they redraw at the spectrogram's x-scale.
+    for (auto&& p : plots) {
+        if (auto trace = dynamic_cast<TracePlot*>(p.get()))
+            trace->setSamplesPerColumn(samplesPerColumn());
+    }
+
     // Update horizontal (time) scrollbar
     horizontalScrollBar()->setSingleStep(10);
     horizontalScrollBar()->setPageStep(100);
@@ -868,6 +950,68 @@ void PlotView::setFFTAndZoom(int size, int zoom)
     // maintain the relative position of the vertical scroll bar
     if (verticalScrollBar()->maximum())
         verticalScrollBar()->setValue((int )(oldPlotCenter * plotsHeight() - viewport()->height() / 2.0 + 0.5f));
+
+    // Re-place the cursors at their saved sample positions on the new pixel
+    // grid. cursors.setSelection() takes viewport-pixel coordinates, so we
+    // subtract the new scrollbar value to get there. updateView()'s own
+    // cursor refresh runs from selectedSamples too but can be perturbed by
+    // the cursorsMoved() signal cascade that fires during setSelection; this
+    // final write nails the canonical value back down.
+    if (reanchorCursors) {
+        int sb = horizontalScrollBar()->value();
+        int minPx = static_cast<int>(sampleToColumn(savedCursorSamples.minimum)) - sb;
+        int maxPx = static_cast<int>(sampleToColumn(savedCursorSamples.maximum)) - sb;
+        cursors.setSelection({minPx, maxPx});
+        selectedSamples = savedCursorSamples;
+        emitTimeSelection();
+        viewport()->update();
+    }
+}
+
+void PlotView::setFrequencyZoom(double zoom)
+{
+    if (spectrogramPlot == nullptr) return;
+
+    // Keep the same frequency under the viewport's vertical centre across the
+    // zoom. The spectrogram is the first plot, so its top edge sits at
+    // viewport-y = -scrollbar, and a viewport-centre y maps to spectrogram-y
+    // (scrollbar + viewport_h/2). After the height changes by zoomRatio we
+    // scale that position so the same frequency lands at the new viewport
+    // centre. Earlier we used the fraction over plotsHeight() which is wrong
+    // when there are other plots stacked below -- you'd land on a different
+    // band of the spectrogram every time you zoomed.
+    int oldHeight = spectrogramPlot->height();
+    if (oldHeight <= 0) {
+        spectrogramPlot->setFrequencyZoom(zoom);
+        updateView();
+        viewport()->update();
+        return;
+    }
+    int viewportH = viewport()->height();
+    int centreYInSpec = verticalScrollBar()->value() + viewportH / 2;
+    // Clamp so we don't anchor outside the spectrogram (e.g. user scrolled
+    // down into a stacked derived plot when they trigger the zoom).
+    centreYInSpec = std::max(0, std::min(oldHeight, centreYInSpec));
+
+    spectrogramPlot->setFrequencyZoom(zoom);
+    currentFreqZoom = std::max(1.0, zoom);
+
+    // Also stretch stacked TracePlots (envelope, IFR, phase, ...) by the same
+    // factor so derived plots scale together with the spectrogram. Without
+    // this the spectrogram grows 4x but the IFR trace stays at its base
+    // height, looking visually disconnected and clipping its own Y range.
+    for (auto&& p : plots) {
+        if (auto trace = dynamic_cast<TracePlot*>(p.get()))
+            trace->setVerticalZoom(currentFreqZoom);
+    }
+    updateView();
+
+    int newHeight = spectrogramPlot->height();
+    double scale = double(newHeight) / double(oldHeight);
+    int newScrollVal = int(centreYInSpec * scale - viewportH / 2.0 + 0.5);
+    newScrollVal = std::max(0, std::min(verticalScrollBar()->maximum(), newScrollVal));
+    verticalScrollBar()->setValue(newScrollVal);
+    viewport()->update();
 }
 
 void PlotView::setPowerMin(int power)
@@ -898,8 +1042,10 @@ void PlotView::paintEvent(QPaintEvent *event)
 #define PLOT_LAYER(paintFunc)                                                   \
     {                                                                           \
         int y = -verticalScrollBar()->value();                                  \
+        size_t spc = samplesPerColumn();                                        \
         for (auto&& plot : plots) {                                             \
             QRect rect = QRect(0, y, width(), plot->height());                  \
+            plot->setViewSamplesPerColumn(spc);                                 \
             plot->paintFunc(painter, rect, viewRange);                          \
             y += plot->height();                                                \
         }                                                                       \
@@ -1119,6 +1265,151 @@ void PlotView::enableAnnotations(bool enabled)
         spectrogramPlot->enableAnnotations(enabled);
 
     viewport()->update();
+}
+
+void PlotView::enableAnnotationEdit(bool enabled)
+{
+    annotationEditEnabled = enabled;
+    annotationDragging = false;
+    annoDragIndex = -1;
+
+    // While editing, take over the drag gesture (ScrollHandDrag would otherwise
+    // pan and steal the cursor). Restore panning when leaving edit mode, unless
+    // the crosshair overlay owns the drag mode.
+    if (enabled) {
+        setDragMode(QGraphicsView::NoDrag);
+    } else if (!crosshairsEnabled) {
+        setDragMode(QGraphicsView::ScrollHandDrag);
+        viewport()->unsetCursor();
+    }
+
+    emit annotationEditChanged(enabled);
+    viewport()->update();
+}
+
+size_t PlotView::pointerSampleAt(int viewportX)
+{
+    return columnToSample(horizontalScrollBar()->value() + viewportX);
+}
+
+double PlotView::pointerFreqAt(int viewportY)
+{
+    int spectrogramTop = -verticalScrollBar()->value();
+    return spectrogramPlot->annotationFreqAtY(viewportY - spectrogramTop);
+}
+
+bool PlotView::annotationEditMouse(QEvent::Type type, QMouseEvent *event)
+{
+    if (spectrogramPlot == nullptr || !spectrogramPlot->isAnnotationsEnabled())
+        return false;
+
+    auto input = spectrogramPlot->input();
+    if (!input)
+        return false;
+    auto &annotations = input->annotationList;
+
+    const QPoint pos = event->pos();
+
+    if (type == QEvent::MouseButtonPress && event->button() == Qt::LeftButton) {
+        AnnotationHit hit = spectrogramPlot->annotationHandleAt(pos);
+        if (hit.index < 0 || hit.index >= static_cast<int>(annotations.size()))
+            return false;
+
+        annotationDragging = true;
+        annoDragIndex = hit.index;
+        annoDragHandle = hit.handle;
+        annoDragStartSamples = annotations[hit.index].sampleRange;
+        annoDragStartFreq = annotations[hit.index].frequencyRange;
+        annoDragStartPointerSample = pointerSampleAt(pos.x());
+        annoDragStartPointerFreq = pointerFreqAt(pos.y());
+        return true;
+    }
+
+    if (type == QEvent::MouseMove) {
+        if (!annotationDragging) {
+            updateAnnotationEditCursor(pos);
+            return false;   // let hover fall through to readout/crosshair
+        }
+        if (annoDragIndex < 0 || annoDragIndex >= static_cast<int>(annotations.size()))
+            return true;
+
+        Annotation &a = annotations[annoDragIndex];
+        size_t curSample = pointerSampleAt(pos.x());
+        double curFreq = pointerFreqAt(pos.y());
+
+        auto h = annoDragHandle;
+        bool left   = h == AnnotationHandle::Left  || h == AnnotationHandle::TopLeft    || h == AnnotationHandle::BottomLeft;
+        bool right  = h == AnnotationHandle::Right || h == AnnotationHandle::TopRight   || h == AnnotationHandle::BottomRight;
+        bool top    = h == AnnotationHandle::Top   || h == AnnotationHandle::TopLeft    || h == AnnotationHandle::TopRight;
+        bool bottom = h == AnnotationHandle::Bottom|| h == AnnotationHandle::BottomLeft || h == AnnotationHandle::BottomRight;
+
+        if (h == AnnotationHandle::Body) {
+            // Translate both ranges by the pointer delta since drag start.
+            ssize_t dSample = static_cast<ssize_t>(curSample) - static_cast<ssize_t>(annoDragStartPointerSample);
+            double dFreq = curFreq - annoDragStartPointerFreq;
+            ssize_t newMin = static_cast<ssize_t>(annoDragStartSamples.minimum) + dSample;
+            ssize_t newMax = static_cast<ssize_t>(annoDragStartSamples.maximum) + dSample;
+            if (newMin < 0) { newMax -= newMin; newMin = 0; }   // clamp at file head, keep width
+            a.sampleRange = { static_cast<size_t>(newMin), static_cast<size_t>(newMax) };
+            a.frequencyRange = { annoDragStartFreq.minimum + dFreq, annoDragStartFreq.maximum + dFreq };
+        } else {
+            // Resize: the grabbed edge follows the pointer; the opposite edge is
+            // pinned. Guard against the edges crossing (keep >= 1 sample / >0 Hz).
+            if (left)
+                a.sampleRange.minimum = std::min(curSample, a.sampleRange.maximum - 1);
+            if (right)
+                a.sampleRange.maximum = std::max(curSample, a.sampleRange.minimum + 1);
+            // y grows downward => smaller y is higher freq (Top -> freq max).
+            if (top)
+                a.frequencyRange.maximum = std::max(curFreq, a.frequencyRange.minimum);
+            if (bottom)
+                a.frequencyRange.minimum = std::min(curFreq, a.frequencyRange.maximum);
+        }
+
+        updateAnnotationEditCursor(pos);
+        viewport()->update();
+        return true;
+    }
+
+    if (type == QEvent::MouseButtonRelease && event->button() == Qt::LeftButton) {
+        if (annotationDragging) {
+            annotationDragging = false;
+            annoDragIndex = -1;
+            annoDragHandle = AnnotationHandle::None;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void PlotView::updateAnnotationEditCursor(const QPoint &pos)
+{
+    if (!annotationEditEnabled)
+        return;
+
+    AnnotationHandle h = annotationDragging
+        ? annoDragHandle
+        : spectrogramPlot->annotationHandleAt(pos).handle;
+
+    Qt::CursorShape shape;
+    switch (h) {
+        case AnnotationHandle::Left:
+        case AnnotationHandle::Right:       shape = Qt::SizeHorCursor; break;
+        case AnnotationHandle::Top:
+        case AnnotationHandle::Bottom:      shape = Qt::SizeVerCursor; break;
+        case AnnotationHandle::TopLeft:
+        case AnnotationHandle::BottomRight: shape = Qt::SizeFDiagCursor; break;
+        case AnnotationHandle::TopRight:
+        case AnnotationHandle::BottomLeft:  shape = Qt::SizeBDiagCursor; break;
+        case AnnotationHandle::Body:        shape = Qt::SizeAllCursor; break;
+        default:                            shape = Qt::ArrowCursor; break;
+    }
+
+    if (h == AnnotationHandle::None)
+        viewport()->unsetCursor();
+    else
+        viewport()->setCursor(shape);
 }
 
 void PlotView::enableAnnoLabels(bool enabled)

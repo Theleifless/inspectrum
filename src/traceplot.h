@@ -32,6 +32,13 @@ public:
 
     void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     std::shared_ptr<AbstractSampleSource> source() { return sampleSource; };
+    void setSamplesPerColumn(int spc) { samplesPerColumn = std::max(1, spc); }
+    // Stretch the plot vertically by a fractional factor. Paired with the
+    // spectrogram's freq zoom so derived plots track its scale instead of
+    // staying frozen at their 200-pixel base height.
+    void setVerticalZoom(double zoom) {
+        setHeight(int(baseHeight * std::max(1.0, zoom) + 0.5));
+    }
 
 signals:
     void imageReady(QString key, QImage image);
@@ -42,6 +49,15 @@ public slots:
 private:
     QSet<QString> tasks;
     const int tileWidth = 1000;
+    // Samples per pixel, fed in by PlotView so we stay aligned with the
+    // spectrogram (which uses fftSize / zoomLevel). 0 falls back to the legacy
+    // "stretch sampleRange to fill rect" behaviour for back-compat with any
+    // future TracePlot not driven by PlotView.
+    int samplesPerColumn = 0;
+    // Cached natural height -- the value setHeight was last given before any
+    // vertical-zoom multiplication. setVerticalZoom multiplies from this base
+    // so successive zooms don't compound.
+    const int baseHeight = 200;
 
     QPixmap getTile(size_t tileID, size_t sampleCount);
     void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange);

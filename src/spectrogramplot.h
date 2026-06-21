@@ -30,10 +30,23 @@
 
 #include <memory>
 #include <array>
+#include <cstdlib>
 #include <math.h>
 #include <vector>
 
 class AnnotationLocation;
+
+// Which part of an annotation box the pointer is over, for drag-editing.
+// Corners resize both axes, edges resize one axis, Body moves the whole box.
+enum class AnnotationHandle {
+    None, Body, Left, Right, Top, Bottom,
+    TopLeft, TopRight, BottomLeft, BottomRight
+};
+
+struct AnnotationHit {
+    int index = -1;                              // into inputSource->annotationList
+    AnnotationHandle handle = AnnotationHandle::None;
+};
 
 
 class TileCacheKey
@@ -97,6 +110,17 @@ public:
     bool isAnnotationsEnabled();
     void enableAnnoColors(bool enabled);
     QString *mouseAnnotationComment(const QMouseEvent *event);
+    // Index into inputSource->annotationList of the annotation under the given
+    // viewport position, or -1 if none. Uses the same hit-test geometry as
+    // mouseAnnotationComment (populated during the last paint).
+    int annotationIndexAt(const QPoint &pos);
+    // Which annotation + handle (edge/corner/body) is under the given viewport
+    // position, for drag-editing. handle == None if nothing is hit.
+    AnnotationHit annotationHandleAt(const QPoint &pos, int margin = 6);
+    // Absolute frequency (annotation frame, RF centre included) for a y offset
+    // from the top of this plot. Inverse of the mapping paintAnnotations() uses,
+    // so dragged edges line up with the drawn boxes.
+    double annotationFreqAtY(int relY);
 
 public slots:
     void setFFTSize(int size);
@@ -104,6 +128,7 @@ public slots:
     void setPowerMin(int power);
     void setZoomLevel(int zoom);
     void setSkip(int skip);
+    void setFrequencyZoom(double zoom);
     void tunerMoved();
 
 private:
@@ -121,6 +146,7 @@ private:
     int fftSize;
     int zoomLevel;
     int nfftSkip;
+    double freqZoom = 1.0; // Vertical zoom: spectrogram height = fftSize * freqZoom
     int decimationPreview = 0;
     double decimationOffset = 0;
     float powerMax;
@@ -151,13 +177,39 @@ class AnnotationLocation
 {
 public:
     Annotation annotation;
+    int index;   // position in inputSource->annotationList
 
-    AnnotationLocation(Annotation annotation, int x, int y, int width, int height)
-        : annotation(annotation), x(x), y(y), width(width), height(height) {}
+    AnnotationLocation(Annotation annotation, int index, int x, int y, int width, int height)
+        : annotation(annotation), index(index), x(x), y(y), width(width), height(height) {}
 
     bool isInside(int pos_x, int pos_y) {
         return (x <= pos_x) && (pos_x <= x + width)
             && (y <= pos_y) && (pos_y <= y + height);
+    }
+
+    // Classify a point against this box's edges/corners/body. `margin` is the
+    // grab tolerance (px) around each edge. Returns None if outside the box
+    // (plus margin). Edges with width/height of only a few px still resolve to
+    // a corner when near an end, which is the intuitive behaviour.
+    AnnotationHandle handleAt(int px, int py, int margin) const {
+        if (px < x - margin || px > x + width + margin ||
+            py < y - margin || py > y + height + margin)
+            return AnnotationHandle::None;
+
+        bool nearLeft   = std::abs(px - x) <= margin;
+        bool nearRight  = std::abs(px - (x + width)) <= margin;
+        bool nearTop    = std::abs(py - y) <= margin;
+        bool nearBottom = std::abs(py - (y + height)) <= margin;
+
+        if (nearTop && nearLeft)     return AnnotationHandle::TopLeft;
+        if (nearTop && nearRight)    return AnnotationHandle::TopRight;
+        if (nearBottom && nearLeft)  return AnnotationHandle::BottomLeft;
+        if (nearBottom && nearRight) return AnnotationHandle::BottomRight;
+        if (nearLeft)                return AnnotationHandle::Left;
+        if (nearRight)               return AnnotationHandle::Right;
+        if (nearTop)                 return AnnotationHandle::Top;
+        if (nearBottom)              return AnnotationHandle::Bottom;
+        return AnnotationHandle::Body;
     }
 
 private:

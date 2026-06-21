@@ -348,7 +348,9 @@ QJsonObject InputSource::readMetaData(const QString &filename)
 
                 auto sigmf_color = sigmf_annotation["presentation:color"].toString();
                 // SigMF uses the format "#RRGGBBAA" for alpha-channel colors, QT uses "#AARRGGBB"
-                if ((sigmf_color.at(0) == '#') && (sigmf_color.length()) == 9) {
+                // Check length first so the empty/short-string case short-circuits before at(0):
+                // in Qt6 an empty QString has a null data pointer and at(0) would crash.
+                if ((sigmf_color.length() == 9) && (sigmf_color.at(0) == '#')) {
                     sigmf_color = "#" + sigmf_color.mid(7,2) + sigmf_color.mid(1,6);
                 }
                 auto boxColor = QString::fromStdString("white");
@@ -414,11 +416,13 @@ void InputSource::openFile(const char *filename)
     QString dataFilename;
 
     annotationList.clear();
+    sigmfMetaFilename.clear();
     QString metaFilename;
 
     if (suffix == "sigmf-meta" || suffix == "sigmf-data" || suffix == "sigmf-") {
         dataFilename = fileInfo.path() + "/" + fileInfo.completeBaseName() + ".sigmf-data";
         metaFilename = fileInfo.path() + "/" + fileInfo.completeBaseName() + ".sigmf-meta";
+        sigmfMetaFilename = metaFilename;
         auto metaData = readMetaData(metaFilename);
         QFile datafile(dataFilename);
         if (!datafile.open(QFile::ReadOnly | QIODevice::Text)) {
@@ -494,4 +498,125 @@ std::unique_ptr<std::complex<float>[]> InputSource::getSamples(size_t start, siz
 
 void InputSource::setFormat(std::string fmt){
     _fmt = fmt;
+}
+
+// Persist the current annotationList back into the .sigmf-meta we loaded from.
+// Preserves every other top-level field (global, captures, vendor extensions,
+// extra annotation keys) by reading the existing JSON, replacing only the
+// "annotations" array, and rewriting atomically. On first save we leave a
+// .sigmf-meta.bak so the user can recover the original.
+bool InputSource::saveAnnotationsToSigMF(QString *errorOut)
+{
+    auto setErr = [&](const QString &m) { if (errorOut) *errorOut = m; };
+
+    if (sigmfMetaFilename.isEmpty()) {
+        setErr("No SigMF metadata file is associated with the current input "
+               "(open a .sigmf-meta or .sigmf-data file to enable annotation save).");
+        return false;
+    }
+
+    // Read the existing meta JSON so we don't clobber unrelated fields.
+    QJsonObject root;
+    QFile in(sigmfMetaFilename);
+    if (in.open(QFile::ReadOnly)) {
+        QJsonParseError parseErr;
+        auto doc = QJsonDocument::fromJson(in.readAll(), &parseErr);
+        in.close();
+        if (parseErr.error != QJsonParseError::NoError || !doc.isObject()) {
+            setErr(QString("Existing %1 is not valid JSON: %2")
+                       .arg(sigmfMetaFilename, parseErr.errorString()));
+            return false;
+        }
+        root = doc.object();
+    } else {
+        setErr(QString("Cannot read existing meta file %1: %2")
+                   .arg(sigmfMetaFilename, in.errorString()));
+        return false;
+    }
+
+    // Carry forward the same offset behaviour the loader applied: annotationList
+    // sampleRanges are stored relative to (capture - core:offset). Add the
+    // offset back when writing.
+    size_t offset = 0;
+    if (root.contains("global") && root["global"].isObject()) {
+        auto global = root["global"].toObject();
+        // Match the (currently-buggy) loader: it checks "core:offset" but reads
+        // "offset". We preserve whatever behaviour the user actually saw on load
+        // so round-tripping is stable.
+        if (global.contains("core:offset")) {
+            offset = static_cast<size_t>(global["offset"].toDouble());
+        }
+    }
+
+    // Positionally pair current annotations with originals so vendor-namespaced
+    // keys (dsp:*, application:*, etc.) on each annotation survive a save.
+    // This is correct as long as the user only edited existing annotations.
+    // Once create/delete UI lands we'll need explicit identity tracking.
+    QJsonArray origAnnos;
+    if (root.contains("annotations") && root["annotations"].isArray())
+        origAnnos = root["annotations"].toArray();
+
+    QJsonArray outAnnos;
+    for (size_t i = 0; i < annotationList.size(); ++i) {
+        const auto &a = annotationList[i];
+
+        QJsonObject obj;
+        if (i < static_cast<size_t>(origAnnos.size()) && origAnnos[int(i)].isObject())
+            obj = origAnnos[int(i)].toObject();
+
+        const size_t sampleStart = a.sampleRange.minimum + offset;
+        const size_t sampleEnd = a.sampleRange.maximum + offset;
+        const size_t sampleCount = (sampleEnd >= sampleStart)
+            ? (sampleEnd - sampleStart + 1) : 0;
+
+        obj["core:sample_start"] = static_cast<double>(sampleStart);
+        obj["core:sample_count"] = static_cast<double>(sampleCount);
+        obj["core:freq_lower_edge"] = a.frequencyRange.minimum;
+        obj["core:freq_upper_edge"] = a.frequencyRange.maximum;
+
+        if (a.label.isEmpty()) obj.remove("core:label");
+        else obj["core:label"] = a.label;
+
+        if (a.comment.isEmpty()) obj.remove("core:comment");
+        else obj["core:comment"] = a.comment;
+
+        if (a.boxColor.isValid()) {
+            // Qt stores "#AARRGGBB"; SigMF expects "#RRGGBBAA". Mirror the
+            // loader's conversion in reverse.
+            QString qcol = a.boxColor.name(QColor::HexArgb); // "#AARRGGBB"
+            if (qcol.length() == 9 && qcol.at(0) == '#') {
+                QString sigmfCol = "#" + qcol.mid(3, 6) + qcol.mid(1, 2);
+                obj["presentation:color"] = sigmfCol;
+            }
+        }
+        outAnnos.append(obj);
+    }
+    root["annotations"] = outAnnos;
+
+    // Back up the original on first save (don't keep overwriting the backup).
+    QString bakFilename = sigmfMetaFilename + ".bak";
+    if (!QFile::exists(bakFilename)) {
+        QFile::copy(sigmfMetaFilename, bakFilename);
+    }
+
+    // Atomic-ish write: write to .tmp, then rename over the original.
+    QString tmpFilename = sigmfMetaFilename + ".tmp";
+    QFile::remove(tmpFilename);
+    QFile out(tmpFilename);
+    if (!out.open(QFile::WriteOnly | QIODevice::Text)) {
+        setErr(QString("Cannot open %1 for writing: %2")
+                   .arg(tmpFilename, out.errorString()));
+        return false;
+    }
+    out.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    out.close();
+
+    QFile::remove(sigmfMetaFilename);
+    if (!QFile::rename(tmpFilename, sigmfMetaFilename)) {
+        setErr(QString("Wrote %1 but could not rename to %2")
+                   .arg(tmpFilename, sigmfMetaFilename));
+        return false;
+    }
+
+    return true;
 }

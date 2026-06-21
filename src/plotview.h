@@ -49,13 +49,18 @@ signals:
     void pointerLeft();
     void zoomIn();
     void zoomOut();
+    void freqZoomNudge(int steps);
     void spectrumPlotAdded(SpectrumView *plot);
+    // Emitted when annotation edit mode changes (e.g. via the right-click SigMF
+    // menu) so the dock checkbox can stay in sync.
+    void annotationEditChanged(bool enabled);
 
 public slots:
     void cursorsMoved();
     void enableCursors(bool enabled);
     void enableScales(bool enabled);
     void enableAnnotations(bool enabled);
+    void enableAnnotationEdit(bool enabled);
     void enableAnnoLabels(bool enabled);
     void enableAnnotationCommentsTooltips(bool enabled);
     void enableAnnoColors(bool enabled);
@@ -64,6 +69,7 @@ public slots:
     void repaint();
     void setCursorSegments(int segments);
     void setFFTAndZoom(int fftSize, int zoomLevel);
+    void setFrequencyZoom(double zoom);
     void setPowerMin(int power);
     void setPowerMax(int power);
 
@@ -91,6 +97,7 @@ private:
     int fftSize = 1024;
     int zoomLevel = 1;
     int nfftSkip = 1;
+    double currentFreqZoom = 1.0; // last applied vertical zoom; seeds newly added plots
     int powerMin;
     int powerMax;
     bool cursorsEnabled;
@@ -104,7 +111,25 @@ private:
     bool crosshairValid = false;      // overlay drawable: pointer seen inside the viewport
     QPoint pointerPos;                 // last pointer position; drives overlay + readout
 
+    // Annotation drag-editing (enabled via the "Edit annotations" toggle). While
+    // active, dragging an annotation's edge/corner resizes it and dragging its
+    // body moves it; the edit is written to annotationList and persisted with
+    // File -> Save Annotations to SigMF.
+    bool annotationEditEnabled = false;
+    bool annotationDragging = false;
+    int annoDragIndex = -1;
+    AnnotationHandle annoDragHandle = AnnotationHandle::None;
+    range_t<size_t> annoDragStartSamples;   // annotation's range at drag start
+    range_t<double> annoDragStartFreq;
+    size_t annoDragStartPointerSample = 0;  // pointer position at drag start (for Body moves)
+    double annoDragStartPointerFreq = 0;
+
     void addPlot(Plot *plot);
+    void editAnnotation(int index);
+    bool annotationEditMouse(QEvent::Type type, QMouseEvent *event);
+    void updateAnnotationEditCursor(const QPoint &pos);
+    size_t pointerSampleAt(int viewportX);
+    double pointerFreqAt(int viewportY);
     void addSpectrumPlot();
     void updateSpectrumPlots();
     void emitTimeSelection();

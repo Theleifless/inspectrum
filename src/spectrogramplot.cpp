@@ -200,7 +200,9 @@ void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<s
             int width = (a.sampleRange.maximum - a.sampleRange.minimum) / getStride();
 
             if (sigmfAnnotationColors) {
-                painter.setPen(a.boxColor);
+                // Fall back to white for annotations with no colour set, so a
+                // cleared colour doesn't inherit the previous box's pen.
+                painter.setPen(a.boxColor.isValid() ? a.boxColor : QColor(Qt::white));
             }
             if (sigmfAnnotationLabels) {
                 // Draw the label 2 pixels above the box
@@ -208,7 +210,7 @@ void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<s
             }
             painter.drawRect(x, y, width, height);
 
-            visibleAnnotationLocations.emplace_back(a, x, y, width, height);
+            visibleAnnotationLocations.emplace_back(a, i, x, y, width, height);
         }
     }
 
@@ -275,6 +277,44 @@ QString *SpectrogramPlot::mouseAnnotationComment(const QMouseEvent *event) {
     return nullptr;
 }
 
+int SpectrogramPlot::annotationIndexAt(const QPoint &pos)
+{
+    // Iterate front-to-back over what was drawn; the last (topmost) match wins
+    // so overlapping boxes resolve to the one drawn on top.
+    int found = -1;
+    for (auto& a : visibleAnnotationLocations) {
+        if (a.isInside(pos.x(), pos.y()))
+            found = a.index;
+    }
+    return found;
+}
+
+AnnotationHit SpectrogramPlot::annotationHandleAt(const QPoint &pos, int margin)
+{
+    // Topmost (last-drawn) box whose edge/corner/body contains the point wins.
+    AnnotationHit hit;
+    for (auto& a : visibleAnnotationLocations) {
+        AnnotationHandle h = a.handleAt(pos.x(), pos.y(), margin);
+        if (h != AnnotationHandle::None) {
+            hit.index = a.index;
+            hit.handle = h;
+        }
+    }
+    return hit;
+}
+
+double SpectrogramPlot::annotationFreqAtY(int relY)
+{
+    // Inverse of paintAnnotations()'s y mapping:
+    //   localY = height()/2 - (absFreq - getFrequency()) / sampleRate * height()
+    int h = height();
+    double centre = inputSource ? inputSource->getFrequency() : 0.0;
+    if (h <= 0 || sampleRate <= 0)
+        return centre;
+    double rel = ((double)h / 2.0 - relY) / (double)h * sampleRate;
+    return rel + centre;
+}
+
 void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
     if (!inputSource || inputSource->count() == 0)
@@ -284,15 +324,29 @@ void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> s
     size_t tileID = sampleRange.minimum - sampleOffset;
     int xoffset = sampleOffset / getStride();
 
+    // The pre-rendered tile pixmap is always fftSize pixels tall (one row per
+    // FFT bin). The plot's height() can be larger (fftSize * freqZoom) when
+    // vertical zoom is on -- letting QPainter stretch handles that. For real
+    // signals we additionally clip the source to the positive-frequency half
+    // (pixmap rows fftSize/2 .. fftSize-1) since the rest is the mirror.
+    const int srcY = inputSource->realSignal() ? fftSize / 2 : 0;
+    const int srcH = inputSource->realSignal() ? fftSize / 2 : fftSize;
+
     // Paint first (possibly partial) tile
-    painter.drawPixmap(QRect(rect.left(), rect.y(), linesPerTile() - xoffset, height()), *getPixmapTile(tileID), QRect(xoffset, 0, linesPerTile() - xoffset, height()));
+    painter.drawPixmap(
+        QRect(rect.left(), rect.y(), linesPerTile() - xoffset, height()),
+        *getPixmapTile(tileID),
+        QRect(xoffset, srcY, linesPerTile() - xoffset, srcH));
     tileID += getStride() * linesPerTile();
 
     // Paint remaining tiles
     for (int x = linesPerTile() - xoffset; x < rect.right(); x += linesPerTile()) {
         // TODO: don't draw past rect.right()
         // TODO: handle partial final tile
-        painter.drawPixmap(QRect(x, rect.y(), linesPerTile(), height()), *getPixmapTile(tileID), QRect(0, 0, linesPerTile(), height()));
+        painter.drawPixmap(
+            QRect(x, rect.y(), linesPerTile(), height()),
+            *getPixmapTile(tileID),
+            QRect(0, srcY, linesPerTile(), srcH));
         tileID += getStride() * linesPerTile();
     }
 }
@@ -343,18 +397,46 @@ float* SpectrogramPlot::getFFTTile(size_t tile)
 void SpectrogramPlot::getLine(float *dest, size_t sample)
 {
     if (inputSource && fft) {
-        // Make sample be the midpoint of the FFT, unless this takes us
-        // past the beginning of the inputSource (if we remove the
-        // std::max(·, 0), then an ugly red bar appears at the beginning
-        // of the spectrogram with large zooms and FFT sizes).
-        const auto first_sample = std::max(static_cast<ssize_t>(sample) - fftSize / 2,
-                        static_cast<ssize_t>(0));
-        auto buffer = inputSource->getSamples(first_sample, fftSize);
+        // Centre the FFT on `sample`. Clamp at the head of the file (otherwise
+        // an ugly red bar appears with large zooms and FFT sizes) and at the
+        // tail too -- previously when first_sample + fftSize exceeded EOF,
+        // getSamples returned null and we filled the column with -inf. That
+        // made the spectrogram visibly end fftSize/2 samples short of the
+        // trace plots' right edge. Zero-pad the partial buffer instead so the
+        // spectrogram and the trace plots stop at the same x-pixel.
+        const ssize_t available = static_cast<ssize_t>(inputSource->count());
+        ssize_t first_sample = static_cast<ssize_t>(sample) - fftSize / 2;
+        if (first_sample < 0)
+            first_sample = 0;
+
+        if (first_sample >= available) {
+            auto neg_infinity = -1 * std::numeric_limits<float>::infinity();
+            for (int i = 0; i < fftSize; i++, dest++)
+                *dest = neg_infinity;
+            return;
+        }
+
+        ssize_t want = fftSize;
+        if (first_sample + want > available)
+            want = available - first_sample;
+
+        auto buffer = inputSource->getSamples(first_sample, want);
         if (buffer == nullptr) {
             auto neg_infinity = -1 * std::numeric_limits<float>::infinity();
             for (int i = 0; i < fftSize; i++, dest++)
                 *dest = neg_infinity;
             return;
+        }
+
+        // Zero-pad to fftSize when getSamples returned a partial buffer at
+        // EOF. Cheaper than resizing in place -- we just need contiguous
+        // storage of length fftSize for the FFT.
+        if (want < fftSize) {
+            auto padded = std::make_unique<std::complex<float>[]>(fftSize);
+            std::copy(buffer.get(), buffer.get() + want, padded.get());
+            for (ssize_t i = want; i < fftSize; i++)
+                padded[i] = std::complex<float>(0.0f, 0.0f);
+            buffer = std::move(padded);
         }
 
         for (int i = 0; i < fftSize; i++) {
@@ -393,7 +475,12 @@ int SpectrogramPlot::getStride()
 
 float SpectrogramPlot::getTunerPhaseInc()
 {
-    auto freq = 0.5f - tuner.centre() / (float)fftSize;
+    // tuner.centre() is in PLOT pixels (height = fftSize * freqZoom, or half
+    // that for real signals). Dividing by fftSize was correct only at
+    // freqZoom == 1 -- once vertical zoom is on, the tuner mixes to the
+    // wrong frequency unless we use the actual logical span. spectrumHeight()
+    // handles both the freq-zoom multiplier and the real-signal half-span.
+    auto freq = 0.5f - tuner.centre() / (float)spectrumHeight();
     return freq * Tau;
 }
 
@@ -441,7 +528,13 @@ double SpectrogramPlot::getTunerRelativeBandwidth()
 
 std::vector<float> SpectrogramPlot::getTunerTaps()
 {
-    float cutoff = tuner.deviation() / (float)fftSize;
+    // Same reasoning as getTunerPhaseInc: use the logical spectrum extent in
+    // pixels, not fftSize, so the tuner's cutoff stays correct when freq
+    // zoom is engaged. Clamp into liquid_firdes_kaiser's accepted (0, 0.5)
+    // range -- at tiny fftSize the default tuner deviation can exceed half
+    // the spectrum.
+    float cutoff = tuner.deviation() / (float)spectrumHeight();
+    cutoff = clamp(cutoff, 0.001f, 0.499f);
     float gain = pow(10.0f, powerMax / -10.0f);
     auto atten = 60.0f;
     auto len = estimate_req_filter_len(std::min(cutoff, 0.05f), atten);
@@ -488,15 +581,37 @@ void SpectrogramPlot::setFFTSize(int size)
     }
 
     if (inputSource->realSignal()) {
-        setHeight(fftSize/2);
+        setHeight(int((fftSize / 2) * freqZoom + 0.5));
     } else {
-        setHeight(fftSize);
+        setHeight(int(fftSize * freqZoom + 0.5));
     }
     auto dev = tuner.deviation();
     auto centre = tuner.centre();
     tuner.setHeight(height());
     tuner.setDeviation( dev * sizeScale );
     tuner.setCentre( centre * sizeScale );
+}
+
+void SpectrogramPlot::setFrequencyZoom(double zoom)
+{
+    double newZoom = std::max(1.0, zoom);
+    if (newZoom == freqZoom) return;
+
+    // The tuner stores its centre/deviation in spectrogram pixels. When the
+    // spectrogram's height changes, we have to rescale those pixel positions
+    // so the band stays at the same frequency. setFFTSize() does a similar
+    // sizeScale dance for FFT-size changes but assumes height = fftSize *
+    // freqZoom; we apply just the freqZoom ratio here.
+    double scale = newZoom / freqZoom;
+    int oldCentre = tuner.centre();
+    int oldDev = tuner.deviation();
+
+    freqZoom = newZoom;
+    setFFTSize(fftSize); // recomputes height(); sizeScale = 1 so it's a no-op for the tuner
+
+    tuner.setHeight(height());
+    tuner.setCentre(int(oldCentre * scale + 0.5));
+    tuner.setDeviation(int(oldDev * scale + 0.5));
 }
 
 void SpectrogramPlot::setPowerMax(int power)
