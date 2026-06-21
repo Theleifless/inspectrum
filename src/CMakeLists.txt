@@ -30,6 +30,7 @@ set(CMAKE_CXX_STANDARD 14)
 list(APPEND inspectrum_sources 
     abstractsamplesource.cpp
     amplitudedemod.cpp
+    annotationdialog.cpp
     cursor.cpp
     cursors.cpp
     main.cpp

@@ -97,6 +97,10 @@ public:
     bool isAnnotationsEnabled();
     void enableAnnoColors(bool enabled);
     QString *mouseAnnotationComment(const QMouseEvent *event);
+    // Index into inputSource->annotationList of the annotation under the given
+    // viewport position, or -1 if none. Uses the same hit-test geometry as
+    // mouseAnnotationComment (populated during the last paint).
+    int annotationIndexAt(const QPoint &pos);
 
 public slots:
     void setFFTSize(int size);
@@ -153,9 +157,10 @@ class AnnotationLocation
 {
 public:
     Annotation annotation;
+    int index;   // position in inputSource->annotationList
 
-    AnnotationLocation(Annotation annotation, int x, int y, int width, int height)
-        : annotation(annotation), x(x), y(y), width(width), height(height) {}
+    AnnotationLocation(Annotation annotation, int index, int x, int y, int width, int height)
+        : annotation(annotation), index(index), x(x), y(y), width(width), height(height) {}
 
     bool isInside(int pos_x, int pos_y) {
         return (x <= pos_x) && (pos_x <= x + width)

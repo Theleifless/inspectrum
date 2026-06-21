@@ -108,6 +108,7 @@ private:
     QPoint pointerPos;                 // last pointer position; drives overlay + readout
 
     void addPlot(Plot *plot);
+    void editAnnotation(int index);
     void addSpectrumPlot();
     void updateSpectrumPlots();
     void emitTimeSelection();

@@ -200,7 +200,9 @@ void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<s
             int width = (a.sampleRange.maximum - a.sampleRange.minimum) / getStride();
 
             if (sigmfAnnotationColors) {
-                painter.setPen(a.boxColor);
+                // Fall back to white for annotations with no colour set, so a
+                // cleared colour doesn't inherit the previous box's pen.
+                painter.setPen(a.boxColor.isValid() ? a.boxColor : QColor(Qt::white));
             }
             if (sigmfAnnotationLabels) {
                 // Draw the label 2 pixels above the box
@@ -208,7 +210,7 @@ void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<s
             }
             painter.drawRect(x, y, width, height);
 
-            visibleAnnotationLocations.emplace_back(a, x, y, width, height);
+            visibleAnnotationLocations.emplace_back(a, i, x, y, width, height);
         }
     }
 
@@ -273,6 +275,18 @@ QString *SpectrogramPlot::mouseAnnotationComment(const QMouseEvent *event) {
         }
     }
     return nullptr;
+}
+
+int SpectrogramPlot::annotationIndexAt(const QPoint &pos)
+{
+    // Iterate front-to-back over what was drawn; the last (topmost) match wins
+    // so overlapping boxes resolve to the one drawn on top.
+    int found = -1;
+    for (auto& a : visibleAnnotationLocations) {
+        if (a.isInside(pos.x(), pos.y()))
+            found = a.index;
+    }
+    return found;
 }
 
 void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)

@@ -18,6 +18,7 @@
  */
 
 #include "plotview.h"
+#include "annotationdialog.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -295,6 +296,19 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         addToggle("Labels",   annotationLabelsEnabled,   &PlotView::enableAnnoLabels);
         addToggle("Comments", annotationCommentsEnabled, &PlotView::enableAnnotationCommentsTooltips);
         addToggle("Colors",   annotationColorsEnabled,   &PlotView::enableAnnoColors);
+
+        // Offer to edit the annotation under the cursor (label / comment /
+        // colour). Writes the change into the in-memory annotation list; the
+        // user persists it with File -> Save Annotations to SigMF.
+        int annoIdx = spectrogramPlot->annotationIndexAt(event->pos());
+        if (annoIdx >= 0) {
+            sigmfMenu->addSeparator();
+            auto editAction = new QAction(tr("Edit annotation..."), sigmfMenu);
+            connect(editAction, &QAction::triggered, this, [this, annoIdx]() {
+                editAnnotation(annoIdx);
+            });
+            sigmfMenu->addAction(editAction);
+        }
     }
 
     // Add submenu for extracting symbols
@@ -350,6 +364,28 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     updateViewRange(false);
     if(menu.exec(event->globalPos()))
         updateView(false);
+}
+
+void PlotView::editAnnotation(int index)
+{
+    if (spectrogramPlot == nullptr)
+        return;
+    auto input = spectrogramPlot->input();
+    if (!input || index < 0 || index >= static_cast<int>(input->annotationList.size()))
+        return;
+
+    Annotation &a = input->annotationList[index];
+    AnnotationDialog dialog(a.label, a.comment, a.boxColor, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    a.label = dialog.label();
+    a.comment = dialog.comment();
+    a.boxColor = dialog.color();   // invalid QColor -> save omits presentation:color
+
+    // Annotations are an overlay (painted each frame from annotationList, not
+    // baked into the cached FFT tiles), so a repaint is enough to reflect edits.
+    viewport()->update();
 }
 
 void PlotView::cursorsMoved()
