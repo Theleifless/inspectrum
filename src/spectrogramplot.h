@@ -33,8 +33,32 @@
 #include <math.h>
 #include <vector>
 
-class TileCacheKey;
 class AnnotationLocation;
+
+
+class TileCacheKey
+{
+
+public:
+    TileCacheKey(int fftSize, int zoomLevel, int nfftSkip, size_t sample) {
+        this->fftSize = fftSize;
+        this->zoomLevel = zoomLevel;
+        this->nfftSkip = nfftSkip;
+        this->sample = sample;
+    }
+
+    bool operator==(const TileCacheKey &k2) const {
+        return (this->fftSize == k2.fftSize) &&
+               (this->zoomLevel == k2.zoomLevel) &&
+               (this->nfftSkip == k2.nfftSkip) &&
+               (this->sample == k2.sample);
+    }
+
+    int fftSize;
+    int zoomLevel;
+    int nfftSkip;
+    size_t sample;
+};
 
 class SpectrogramPlot : public Plot
 {
@@ -46,7 +70,8 @@ public:
     std::shared_ptr<AbstractSampleSource> output() override;
     void paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampleRange) override;
     void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange) override;
-    bool mouseEvent(QEvent::Type type, QMouseEvent event) override;
+    bool mouseEvent(QEvent::Type type, QMouseEvent *event) override;
+    void leaveEvent();
     std::shared_ptr<SampleSource<std::complex<float>>> input() { return inputSource; };
     double getCenterFrequency();
     double frequencyAt(int y);
@@ -120,30 +145,6 @@ private:
     void paintFrequencyScale(QPainter &painter, QRect &rect);
     void paintAnnotations(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     void paintDecimationOverlay(QPainter &painter, QRect &rect);
-};
-
-class TileCacheKey
-{
-
-public:
-    TileCacheKey(int fftSize, int zoomLevel, int nfftSkip, size_t sample) {
-        this->fftSize = fftSize;
-        this->zoomLevel = zoomLevel;
-        this->nfftSkip = nfftSkip;
-        this->sample = sample;
-    }
-
-    bool operator==(const TileCacheKey &k2) const {
-        return (this->fftSize == k2.fftSize) &&
-               (this->zoomLevel == k2.zoomLevel) &&
-               (this->nfftSkip == k2.nfftSkip) &&
-               (this->sample == k2.sample);
-    }
-
-    int fftSize;
-    int zoomLevel;
-    int nfftSkip;
-    size_t sample;
 };
 
 class AnnotationLocation
