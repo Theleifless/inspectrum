@@ -348,7 +348,9 @@ QJsonObject InputSource::readMetaData(const QString &filename)
 
                 auto sigmf_color = sigmf_annotation["presentation:color"].toString();
                 // SigMF uses the format "#RRGGBBAA" for alpha-channel colors, QT uses "#AARRGGBB"
-                if ((sigmf_color.at(0) == '#') && (sigmf_color.length()) == 9) {
+                // Check length first so the empty/short-string case short-circuits before at(0):
+                // in Qt6 an empty QString has a null data pointer and at(0) would crash.
+                if ((sigmf_color.length() == 9) && (sigmf_color.at(0) == '#')) {
                     sigmf_color = "#" + sigmf_color.mid(7,2) + sigmf_color.mid(1,6);
                 }
                 auto boxColor = QString::fromStdString("white");
